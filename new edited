@@ -1,0 +1,670 @@
+#region VEXcode Generated Robot Configuration
+from vex import *
+import urandom
+
+# Brain should be defined by default
+brain=Brain()
+
+# Robot configuration code
+
+
+# wait for rotation sensor to fully initialize
+wait(30, MSEC)
+
+
+# Make random actually random
+def initializeRandomSeed():
+    wait(100, MSEC)
+    random = brain.battery.voltage(MV) + brain.battery.current(CurrentUnits.AMP) * 100 + brain.timer.system_high_res()
+    urandom.seed(int(random))
+      
+# Set random seed 
+initializeRandomSeed()
+
+
+def play_vexcode_sound(sound_name):
+    # Helper to make playing sounds from the V5 in VEXcode easier and
+    # keeps the code cleaner by making it clear what is happening.
+    print("VEXPlaySound:" + sound_name)
+    wait(5, MSEC)
+
+# add a small delay to make sure we don't print in the middle of the REPL header
+wait(200, MSEC)
+# clear the console to make sure we don't have the REPL in the console
+print("\033[2J")
+
+#endregion VEXcode Generated Robot Configuration
+from vex import *
+import urandom
+import math
+
+# Brain should be defined by default
+brain = Brain()
+
+# Robot configuration code
+# AI Classification Competition Element IDs
+class GameElements:
+    MOBILE_GOAL = 0
+    RED_RING = 1
+    BLUE_RING = 2
+
+# Motor configuration
+left_motor_a = Motor(Ports.PORT20, GearSetting.RATIO_18_1, True)
+left_motor_b = Motor(Ports.PORT11, GearSetting.RATIO_18_1, True)
+left_drive_smart = MotorGroup(left_motor_a, left_motor_b)
+right_motor_a = Motor(Ports.PORT12, GearSetting.RATIO_18_1, False)
+right_motor_b = Motor(Ports.PORT16, GearSetting.RATIO_18_1, False)
+right_drive_smart = MotorGroup(right_motor_a, right_motor_b)
+drivetrain = DriveTrain(left_drive_smart, right_drive_smart, 219.44, 295, 40, MM, 1)
+
+# Pneumatic configuration
+left_piston = DigitalOut(brain.three_wire_port.a)  # For mobile goal or mechanism
+right_piston = DigitalOut(brain.three_wire_port.b)  # For mobile goal or mechanism
+extent_piston = DigitalOut(brain.three_wire_port.c)  # For additional mechanism
+
+# Controller
+controller_1 = Controller(PRIMARY)
+
+# Intake motors
+intake_belt = Motor(Ports.PORT17, GearSetting.RATIO_6_1, True)
+intake_wheels = Motor(Ports.PORT18, GearSetting.RATIO_6_1, False)
+
+# Sensors
+gps_sensor = Gps(Ports.PORT21, 132.08, -88.90, MM, 0)
+ai_vision_sensor = AiVision(Ports.PORT2, AiVision.ALL_AIOBJS)
+left_rotation = Rotation(Ports.PORT14, False)
+right_rotation = Rotation(Ports.PORT3, False)
+
+# Wait for sensors to initialize
+wait(30, MSEC)
+
+# Make random actually random
+def initializeRandomSeed():
+    wait(100, MSEC)
+    random = brain.battery.voltage(MV) + brain.battery.current(CurrentUnits.AMP) * 100 + brain.timer.system_high_res()
+    urandom.seed(int(random))
+
+# Set random seed
+initializeRandomSeed()
+
+# Helper function to play sounds
+def play_vexcode_sound(sound_name):
+    print("VEXPlaySound:" + sound_name)
+    wait(5, MSEC)
+
+# Clear console
+wait(200, MSEC)
+print("\033[2J")
+
+# Teleop control thread
+drivetrain_needs_to_be_stopped_controller_1 = False
+remote_control_code_enabled = True
+
+def rc_auto_loop_function_controller_1():
+    global drivetrain_needs_to_be_stopped_controller_1, remote_control_code_enabled
+    while True:
+        if remote_control_code_enabled:
+            drivetrain_left_side_speed = controller_1.axis2.position() + controller_1.axis1.position()
+            drivetrain_right_side_speed = controller_1.axis2.position() - controller_1.axis1.position()
+            if abs(drivetrain_left_side_speed) < 5 and abs(drivetrain_right_side_speed) < 5:
+                if drivetrain_needs_to_be_stopped_controller_1:
+                    left_drive_smart.stop()
+                    right_drive_smart.stop()
+                    drivetrain_needs_to_be_stopped_controller_1 = False
+            else:
+                drivetrain_needs_to_be_stopped_controller_1 = True
+                left_drive_smart.set_velocity(drivetrain_left_side_speed, PERCENT)
+                right_drive_smart.set_velocity(drivetrain_right_side_speed, PERCENT)
+                left_drive_smart.spin(FORWARD)
+                right_drive_smart.spin(FORWARD)
+        wait(20, MSEC)
+
+rc_auto_loop_thread_controller_1 = Thread(rc_auto_loop_function_controller_1)
+
+# Parameters for turning PID control
+turn_kP = 0.35    # Proportional constant
+turn_kI = 0.001   # Integral constant
+turn_kD = 0.03    # Derivative constant
+turn_tolerance = 1.0  # Acceptable error in degrees
+min_turn_speed = 10  # Minimum turn speed to overcome friction
+max_turn_speed = 30  # Maximum turn speed
+
+def normalize_heading(heading):
+    """Normalize heading to be between 0-360 degrees"""
+    while heading < 0:
+        heading += 360
+    while heading >= 360:
+        heading -= 360
+    return heading
+
+def shortest_angle_difference(target, current):
+    """Calculate the shortest angle to turn (handles wraparound)"""
+    diff = normalize_heading(target) - normalize_heading(current)
+    if diff > 180:
+        diff -= 360
+    elif diff < -180:
+        diff += 360
+    return diff
+
+def turn_to_heading(target_heading, max_speed):
+    """Turn the robot to a specific heading using PID control with GPS sensor"""
+    if not gps_sensor.installed():
+        print("Error: GPS sensor not detected")
+        return False
+
+    print("Starting turn to heading: " + str(target_heading) + " degrees")
+    target_heading = normalize_heading(target_heading)
+    integral = 0
+    prev_error = 0
+    current_heading = gps_sensor.heading()
+    error = shortest_angle_difference(target_heading, current_heading)
+    timer = Timer()
+    timer.reset()
+    max_time = 3  # seconds
+    start_time = brain.timer.time(SECONDS)
+    stall_count = 0
+    max_stalls = 3
+
+    while abs(error) > turn_tolerance:
+        if brain.timer.time(SECONDS) - start_time > max_time:
+            print("Turn timeout - breaking out of turn")
+            break
+
+        current_heading = gps_sensor.heading()
+        error = shortest_angle_difference(target_heading, current_heading)
+        integral += error
+        if abs(integral) > 1000:
+            integral = 1000 if integral > 0 else -1000
+
+        if timer.time(SECONDS) > 1.5:
+            if abs(prev_error - error) < 1:
+                integral = 0
+                print("Progress stalled, resetting integral")
+                stall_count += 1
+                if stall_count >= max_stalls:
+                    print("Too many stalls, breaking out of turn")
+                    break
+            timer.reset()
+
+        derivative = error - prev_error
+        power = (error * turn_kP) + (integral * turn_kI) + (derivative * turn_kD)
+        if 0 < abs(power) < min_turn_speed:
+            power = min_turn_speed * (1 if power > 0 else -1)
+        if abs(power) > max_speed:
+            power = max_speed * (1 if power > 0 else -1)
+
+        left_drive_smart.spin(FORWARD, power, PERCENT)
+        right_drive_smart.spin(REVERSE, power, PERCENT)
+        prev_error = error
+        wait(20, MSEC)
+
+    left_drive_smart.stop(BRAKE)
+    right_drive_smart.stop(BRAKE)
+    print("Turn complete: Current= " + str(round(gps_sensor.heading(), 1)) + ", Target= " + str(target_heading))
+    return True
+
+def turn_by_angle(angle_degrees, max_speed):
+    """Turn the robot by a relative angle using the GPS sensor"""
+    if not gps_sensor.installed():
+        print("Error: GPS sensor not detected")
+        return False
+
+    current_heading = gps_sensor.heading()
+    target_heading = normalize_heading(current_heading + angle_degrees)
+    print("Starting relative turn of " + str(angle_degrees) + " degrees")
+    print("Current heading: " + str(round(current_heading, 1)) + ", Target heading: " + str(round(target_heading, 1)))
+    turn_to_heading(target_heading, max_speed)
+
+    current = gps_sensor.heading()
+    remaining_error = abs(shortest_angle_difference(target_heading, current))
+    if remaining_error > 5:
+        print("Significant error remains (" + str(round(remaining_error, 1)) + "), attempting one more correction")
+        wait(25, MSEC)
+        turn_to_heading(target_heading, max_speed)
+    return True
+
+# PID constants for straight driving
+kP = 0.3   # Proportional gain
+kI = 0.05  # Integral gain
+kD = 0.02  # Derivative gain
+MAX_INTEGRAL = 50
+
+def reset_rotations():
+    """Reset rotation sensors"""
+    if not (left_rotation.installed() and right_rotation.installed()):
+        print("Error: Rotation sensors not detected")
+        return False
+    left_rotation.reset_position()
+    right_rotation.reset_position()
+    return True
+
+def drive_straight_pid(distance_deg, speed_pct):
+    """Drive straight for a specific distance in degrees using PID"""
+    if not reset_rotations():
+        return False
+
+    target_position = abs(distance_deg)
+    direction = 1 if distance_deg > 0 else -1
+    prev_error = 0
+    integral = 0
+    average_position = 0
+    last_time = brain.timer.time(MSEC)
+    max_time = 5
+    start_time = brain.timer.time(SECONDS)
+
+    while average_position < target_position:
+        if brain.timer.time(SECONDS) - start_time > max_time:
+            print("Drive timeout - breaking out")
+            break
+
+        current_time = brain.timer.time(MSEC)
+        dt = max(current_time - last_time, 1)
+        last_time = current_time
+
+        left_position = abs(left_rotation.position(DEGREES))
+        right_position = abs(right_rotation.position(DEGREES))
+        average_position = (left_position + right_position) / 2
+        position_error = left_position - right_position
+
+        p_term = position_error * kP
+        integral += position_error * dt / 1000.0
+        integral = max(min(integral, MAX_INTEGRAL), -MAX_INTEGRAL)
+        i_term = integral * kI
+        derivative = (position_error - prev_error) / (dt / 1000.0)
+        d_term = derivative * kD
+        correction = p_term + i_term + d_term
+
+        prev_error = position_error
+        left_speed = speed_pct * direction + correction
+        right_speed = speed_pct * direction - correction
+        left_speed = max(min(left_speed, 100), -100)
+        right_speed = max(min(right_speed, 100), -100)
+
+        left_drive_smart.set_velocity(left_speed, PERCENT)
+        right_drive_smart.set_velocity(right_speed, PERCENT)
+        left_drive_smart.spin(FORWARD)
+        right_drive_smart.spin(FORWARD)
+
+        progress_percent = (average_position/target_position*100)
+        print("L: " + str(round(left_position, 1)) + " R: " + str(round(right_position, 1)) + 
+              " E: " + str(round(position_error, 1)) + " P: " + str(round(progress_percent, 1)) + "%")
+        wait(20, MSEC)
+
+    left_drive_smart.stop(BRAKE)
+    right_drive_smart.stop(BRAKE)
+    print("Drive complete!")
+    return True
+
+def drive_distance_with_timeout(distance_deg, speed_pct, timeout_sec):
+    """Drive with timeout handling"""
+    wait(100, MSEC)
+    timer = Timer()
+    timer.reset()
+    success = drive_straight_pid(distance_deg, speed_pct)
+    if timer.time(SECONDS) >= timeout_sec:
+        print("Drive timed out!")
+        left_drive_smart.stop(BRAKE)
+        right_drive_smart.stop(BRAKE)
+        return False
+    return success
+
+def calculate_timeout(distance_mm, speed_percent):
+    """Calculate timeout based on distance and speed"""
+    max_speed = 500  # mm/s at 100% speed (adjust based on robot testing)
+    actual_speed = (speed_percent / 100) * max_speed
+    timeout = (distance_mm / actual_speed) * 1.5
+    return max(timeout, 1.0)
+
+def backup_from_obstacle():
+    """Perform backup maneuver when stuck"""
+    print("Initiating backup maneuver")
+    left_drive_smart.spin(REVERSE, 40, PERCENT)
+    right_drive_smart.spin(REVERSE, 40, PERCENT)
+    wait(1000, MSEC)
+    left_drive_smart.stop(BRAKE)
+    right_drive_smart.stop(BRAKE)
+    random_turn = urandom.randint(-45, 45)
+    turn_by_angle(random_turn, 30)
+    print("Backup complete")
+
+def is_robot_stuck():
+    """Detect if robot is stuck"""
+    initial_left_pos = left_rotation.position(DEGREES)
+    initial_right_pos = right_rotation.position(DEGREES)
+    wait(500, MSEC)
+    current_left_pos = left_rotation.position(DEGREES)
+    current_right_pos = right_rotation.position(DEGREES)
+    left_change = abs(current_left_pos - initial_left_pos)
+    right_change = abs(current_right_pos - initial_right_pos)
+    return left_change < 15 and right_change < 15
+
+# Constants for navigation
+wheelDiameter = 2.75  # Inches
+wheelCircumference = math.pi * wheelDiameter
+travelDistance = 48  # Inches
+error_margin = 5  # Inches
+numberOfDegrees = ((travelDistance - error_margin) / wheelCircumference) * 360
+
+# Dynamic movement distances based on ring size
+SMALL_MOVE = numberOfDegrees / 4    # Quarter move for fine adjustments
+MEDIUM_MOVE = numberOfDegrees / 2   # Half move for medium adjustments
+LARGE_MOVE = numberOfDegrees        # Full move for large movements
+
+# Vision and alignment constants
+VISION_CENTER_X = 160  # Center of 320px vision sensor
+ALIGNMENT_TOLERANCE = 8  # Pixels - tighter tolerance for better alignment
+FINE_ALIGNMENT_TOLERANCE = 5  # Even tighter for final approach
+VISION_SAMPLES = 2  # Number of snapshots to take for reliability
+
+# Ring size thresholds for different approach strategies
+RING_COLLECT_SIZE = 120    # Size when ring is ready to collect
+RING_CLOSE_SIZE = 80       # Size when ring is close
+RING_MEDIUM_SIZE = 40      # Size when ring is at medium distance
+RING_FAR_SIZE = 20         # Minimum size to consider ring visible
+
+def get_reliable_vision_data(samples=VISION_SAMPLES):
+    """Take multiple snapshots for better detection reliability"""
+    best_blue_rings = []
+    best_red_rings = []
+    
+    for i in range(samples):
+        objs = ai_vision_sensor.take_snapshot(AiVision.ALL_AIOBJS)
+        if objs:
+            blue_rings = [obj for obj in objs if obj.id == GameElements.BLUE_RING]
+            red_rings = [obj for obj in objs if obj.id == GameElements.RED_RING]
+            
+            # Keep the sample with the most blue rings, or the one with largest rings
+            if blue_rings:
+                if not best_blue_rings or len(blue_rings) > len(best_blue_rings):
+                    best_blue_rings = blue_rings
+                    best_red_rings = red_rings
+                elif len(blue_rings) == len(best_blue_rings):
+                    # If same count, prefer the one with larger rings
+                    current_max = max(blue_rings, key=lambda x: x.width).width
+                    best_max = max(best_blue_rings, key=lambda x: x.width).width
+                    if current_max > best_max:
+                        best_blue_rings = blue_rings
+                        best_red_rings = red_rings
+        
+        if i < samples - 1:  # Don't wait after last sample
+            wait(50, MSEC)
+    
+    return best_blue_rings, best_red_rings
+
+def calculate_turn_angle(error, ring_width):
+    """Calculate proportional turn angle based on error and ring distance"""
+    # Base turn angle proportional to error
+    base_angle = error * 0.25  # Scale factor - adjust as needed
+    
+    # Adjust turn angle based on ring distance (larger rings = smaller turns)
+    if ring_width > RING_CLOSE_SIZE:
+        # Ring is close, use smaller adjustments
+        angle_multiplier = 0.5
+    elif ring_width > RING_MEDIUM_SIZE:
+        # Ring is medium distance, use normal adjustments
+        angle_multiplier = 1.0
+    else:
+        # Ring is far, use larger adjustments
+        angle_multiplier = 1.5
+    
+    turn_angle = base_angle * angle_multiplier
+    
+    # Clamp turn angle to reasonable range
+    turn_angle = max(-35, min(35, turn_angle))
+    
+    # Ensure minimum turn for small errors to overcome friction
+    if 0 < abs(turn_angle) < 5:
+        turn_angle = 5 if turn_angle > 0 else -5
+    
+    return turn_angle
+
+def align_to_ring(target_ring, tolerance=ALIGNMENT_TOLERANCE):
+    """Improved ring alignment with proportional control"""
+    center_x = target_ring.centerX
+    ring_width = target_ring.width
+    error = center_x - VISION_CENTER_X
+    
+    print("Aligning to ring - Center: " + str(center_x) + ", Width: " + str(ring_width) + ", Error: " + str(error))
+    
+    if abs(error) <= tolerance:
+        print("Ring already aligned!")
+        return True
+    
+    turn_angle = calculate_turn_angle(error, ring_width)
+    print("Calculated turn angle: " + str(round(turn_angle, 1)) + " degrees")
+    
+    # Perform the turn
+    turn_by_angle(turn_angle, 25)
+    wait(200, MSEC)  # Allow time for movement to settle
+    
+    return False
+
+def get_approach_strategy(ring_width):
+    """Determine approach strategy based on ring size"""
+    if ring_width >= RING_COLLECT_SIZE:
+        return "collect", 0, 25  # action, distance, speed
+    elif ring_width >= RING_CLOSE_SIZE:
+        return "slow_approach", SMALL_MOVE, 25
+    elif ring_width >= RING_MEDIUM_SIZE:
+        return "medium_approach", MEDIUM_MOVE, 35
+    elif ring_width >= RING_FAR_SIZE:
+        return "fast_approach", LARGE_MOVE, 45
+    else:
+        return "not_visible", 0, 0
+
+def check_red_obstruction(red_rings, blue_ring):
+    """Check if red rings are obstructing the path to blue ring"""
+    if not red_rings:
+        return False, None
+    
+    blue_center = blue_ring.centerX
+    blue_width = blue_ring.width
+    
+    for red_ring in red_rings:
+        red_center = red_ring.centerX
+        red_width = red_ring.width
+        
+        # Check if red ring is larger (closer) and in similar position
+        if (red_width > blue_width * 0.8 and  # Red ring is significantly visible
+            abs(red_center - blue_center) < 60):  # Red ring is near blue ring path
+            print("Red obstruction detected - Red: center=" + str(red_center) + ", width=" + str(red_width))
+            return True, red_ring
+    
+    return False, None
+
+def avoid_red_obstruction(red_ring, blue_ring):
+    """Maneuver around red ring obstruction"""
+    print("Executing red ring avoidance maneuver...")
+    
+    # Stop intake temporarily
+    intake_belt.stop()
+    intake_wheels.stop()
+    
+    red_center = red_ring.centerX
+    blue_center = blue_ring.centerX
+    
+    # Determine which side to go around
+    if red_center < VISION_CENTER_X:
+        # Red ring is on left, go right
+        avoid_angle = 30
+        print("Red ring on left, avoiding right")
+    else:
+        # Red ring is on right, go left  
+        avoid_angle = -30
+        print("Red ring on right, avoiding left")
+    
+    # Execute avoidance maneuver
+    turn_by_angle(avoid_angle, 30)
+    drive_distance_with_timeout(MEDIUM_MOVE, 35, calculate_timeout(200, 35))
+    turn_by_angle(-avoid_angle, 30)
+    
+    # Restart intake
+    intake_belt.spin(FORWARD, 85, PERCENT)
+    intake_wheels.spin(FORWARD, 85, PERCENT)
+    
+    wait(300, MSEC)
+    print("Avoidance maneuver complete")
+
+def perform_scanning_rotation(scan_angle=30, scan_speed=20):
+    """Perform controlled scanning rotation to find rings"""
+    print("Scanning for rings - rotating " + str(scan_angle) + " degrees...")
+    turn_by_angle(scan_angle, scan_speed)
+    wait(300, MSEC)  # Allow time for vision to stabilize
+
+def main():
+    """Enhanced main program for blue ring detection and navigation"""
+    if not gps_sensor.installed():
+        print("Error: GPS sensor not detected")
+        return
+    if not ai_vision_sensor.installed():
+        print("Error: AI Vision sensor not detected")
+        return
+    if not (left_rotation.installed() and right_rotation.installed()):
+        print("Error: Rotation sensors not detected")
+        return
+
+    print("Starting enhanced blue ring detection and navigation program")
+    rings_collected = 0
+    stuck_counter = 0
+    max_stuck_count = 3
+    max_rings = 5  # Exit condition
+    scan_direction = 1  # 1 for right, -1 for left
+    consecutive_no_rings = 0
+    max_no_rings = 8  # Max scans without finding rings before giving up
+
+    # Start intake motors
+    intake_belt.spin(FORWARD, 85, PERCENT)
+    intake_wheels.spin(FORWARD, 85, PERCENT)
+
+    # Set drivetrain speeds
+    drivetrain.set_turn_velocity(30, PERCENT)
+    drivetrain.set_drive_velocity(30, PERCENT)
+
+    while rings_collected < max_rings and consecutive_no_rings < max_no_rings:
+        print("\n=== SCAN CYCLE " + str(rings_collected + 1) + " ===")
+        print("Blue rings collected: " + str(rings_collected))
+        print("GPS heading: " + str(round(gps_sensor.heading(), 1)) + " degrees")
+        print("Battery voltage: " + str(round(brain.battery.voltage(VOLT), 1)) + " V")
+        
+        remote_control_code_enabled = False  # Disable teleop
+
+        # Get vision data with multiple samples for reliability
+        blue_rings, red_rings = get_reliable_vision_data()
+
+        if not blue_rings:
+            print("No blue rings detected in any sample")
+            consecutive_no_rings += 1
+            
+            # Perform scanning rotation
+            scan_angle = 30 * scan_direction
+            perform_scanning_rotation(scan_angle, 20)
+            scan_direction *= -1  # Alternate scan direction
+            
+            continue
+        
+        # Reset no-rings counter since we found rings
+        consecutive_no_rings = 0
+        
+        # Select the best target ring (largest/closest)
+        target_ring = max(blue_rings, key=lambda x: x.width)
+        ring_width = target_ring.width
+        ring_center_x = target_ring.centerX
+        
+        print("Target blue ring - Width: " + str(ring_width) + ", Center: " + str(ring_center_x))
+        
+        # Check for red ring obstructions
+        obstruction, obstructing_red = check_red_obstruction(red_rings, target_ring)
+        
+        if obstruction:
+            avoid_red_obstruction(obstructing_red, target_ring)
+            continue
+        
+        # Determine approach strategy
+        strategy, move_distance, move_speed = get_approach_strategy(ring_width)
+        print("Strategy: " + strategy + ", Distance: " + str(int(move_distance)) + " deg, Speed: " + str(move_speed) + "%")
+        
+        if strategy == "collect":
+            print("*** COLLECTING RING ***")
+            # Final alignment before collection
+            if not align_to_ring(target_ring, FINE_ALIGNMENT_TOLERANCE):
+                # Take another vision sample after alignment
+                blue_rings_check, _ = get_reliable_vision_data(1)
+                if blue_rings_check:
+                    target_ring = max(blue_rings_check, key=lambda x: x.width)
+                    align_to_ring(target_ring, FINE_ALIGNMENT_TOLERANCE)
+            
+            # Move forward to collect
+            drive_distance_with_timeout(SMALL_MOVE, 30, calculate_timeout(100, 30))
+            
+            if is_robot_stuck():
+                stuck_counter += 1
+                print("Robot stuck during collection, count: " + str(stuck_counter))
+                if stuck_counter >= max_stuck_count:
+                    backup_from_obstacle()
+                    stuck_counter = 0
+                    continue
+            else:
+                stuck_counter = 0
+                rings_collected += 1
+                print("*** RING COLLECTED! Total: " + str(rings_collected) + " ***")
+                
+                # Move forward after collection to clear the area
+                drive_distance_with_timeout(MEDIUM_MOVE, 35, calculate_timeout(150, 35))
+                
+                if is_robot_stuck():
+                    backup_from_obstacle()
+        
+        elif strategy == "not_visible":
+            print("Ring too small/far - scanning for better target")
+            perform_scanning_rotation(25 * scan_direction, 15)
+            scan_direction *= -1
+        
+        else:  # All approach strategies
+            # First align to the ring
+            aligned = align_to_ring(target_ring)
+            
+            if not aligned:
+                # Take another vision sample after alignment to verify
+                blue_rings_check, _ = get_reliable_vision_data(1)
+                if blue_rings_check:
+                    # Check if we can still see a good ring
+                    updated_ring = max(blue_rings_check, key=lambda x: x.width)
+                    if updated_ring.width > RING_FAR_SIZE:
+                        target_ring = updated_ring
+                        print("Updated target after alignment - Width: " + str(target_ring.width))
+            
+            # Move forward based on strategy
+            print("Executing " + strategy + " - moving forward")
+            success = drive_distance_with_timeout(move_distance, move_speed, 
+                                                calculate_timeout(move_distance * 2, move_speed))
+            
+            if not success or is_robot_stuck():
+                stuck_counter += 1
+                print("Movement failed or robot stuck, count: " + str(stuck_counter))
+                if stuck_counter >= max_stuck_count:
+                    backup_from_obstacle()
+                    stuck_counter = 0
+                    continue
+            else:
+                stuck_counter = 0
+
+        wait(100, MSEC)  # Small delay between cycles
+
+    # Program completion
+    if rings_collected >= max_rings:
+        print("\n*** SUCCESS! Maximum rings collected: " + str(rings_collected) + " ***")
+    else:
+        print("\n*** PROGRAM ENDED - Rings collected: " + str(rings_collected) + " ***")
+        print("Reason: No more rings detected after extensive scanning")
+    
+    # Stop intake motors
+    intake_belt.stop()
+    intake_wheels.stop()
+    
+    # Re-enable teleop
+    remote_control_code_enabled = True
+    
+    print("Program complete!")
+
+# Start the program
+main()
